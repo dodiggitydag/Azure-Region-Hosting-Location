@@ -1,11 +1,25 @@
+# Terms:
+#  Azure Region: A place where Dynamics 365 can be hosted.
+#  Latency: the time it takes for a network packet to travel between two places, i.e. a location to Azure Region.
+#  Location: A place where workers work and need to access Dynamics 365
+#  Workers: employees, contractors, or temporary employees working at a location
+
 from ortools.sat.python import cp_model
+import csv
 
 # Define the model.
 model = cp_model.CpModel()
 
-# Define the variables.
-# These are the possible locations that Dynamics 365 can be deployed to.
-locations = [
+##################################################################################
+# Define Variables
+##################################################################################
+
+# The latency for each location MUST be less than ABSOLUTE_ACCEPTABLE_LATENCY milliseconds for all workers.
+ABSOLUTE_ACCEPTABLE_LATENCY = 450
+OUTPUT_CSV_NAME = 'latencies_to_suggestion.csv'
+
+# These are the possible Azure Regions that Dynamics 365 can be deployed to.
+azure_regions = [
     'Canada Central', 'France Central', 'Germany West Central', 'UK South', 'UK West',
     'North Europe', 'Italy North', 'Switzerland North', 'West Europe', 'East US', 'East US 2',
     'North Central US', 'South Central US', 'Norway East', 'Poland Central', 'Sweden Central',
@@ -16,7 +30,7 @@ locations = [
     'Australia East', 'East Asia', 'Australia Central'
 ]
 # The decision variables are 0-1 variables for each possible location.
-location_vars = {location: model.NewBoolVar(location) for location in locations}
+azure_region_options = {location: model.NewBoolVar(location) for location in locations}
 
 # Define the data.
 workers = {
@@ -55,18 +69,27 @@ latencies = {
     'Location O': {'France Central': 181, 'Germany West Central': 129, 'UK South': 281, 'UK West': 136, 'Italy North': 252, 'North Europe': 397, 'Switzerland North': 207, 'West Europe': 315, 'Central US': 174, 'East US 2': 216, 'East US': 74, 'Norway East': 77, 'Poland Central': 354, 'West Central US': 205, 'North Central US': 345, 'South Central US': 360, 'Central India': 88, 'Sweden Central': 143, 'Canada Central': 295, 'West US 2': 198, 'Japan East': 179, 'South India': 362, 'Southeast Asia': 172, 'West India': 385, 'West US 3': 304, 'West US': 73, 'Canada East': 107, 'Israel Central': 239, 'Qatar Central': 264, 'East Asia': 254, 'UAE North': 291, 'Japan West': 103, 'Korea South': 146, 'Korea Central': 283, 'Australia Central': 181, 'Australia East': 237, 'Australia Southeast': 298, 'Brazil South': 223, 'South Africa North': 323}
 }
 
+##################################################################################
+# Data Validation
+##################################################################################
+
+# Check if each region has at least one location with a latency less than 130
+for region, region_latencies in latencies.items():
+    if all(latency >= 130 for latency in region_latencies.values()):
+        print(f"No location with latency less than 130 for region: {region}.  Recommend increasing internet connection.")
+
 #########################################
 # Constraints
 #########################################
-# The sum of the location_vars must be 1, meaning only one location can be chosen.
-model.Add(sum(location_vars.values()) == 2)
+# The sum of the azure_region_options must be 1, meaning only one location can be chosen.
+model.Add(sum(azure_region_options.values()) == 2)
 
-# The latency for each location must be less than 450ms for all workers, or return that there is no solution.
+# The latency for each location must be less than ABSOLUTE_ACCEPTABLE_LATENCY for all workers, or return that there is no solution.
 # Likely the person needs to enable more (2+) production locations instead of one to fulfil the requirements.
 # Personally, I'd like to keep it to less than 300ms.
 for worker_location, worker_count in workers.items():
-    for location, location_var in location_vars.items():
-        model.Add(latencies[worker_location][location] * location_var <= 450)
+    for location, location_var in azure_region_options.items():
+        model.Add(latencies[worker_location][location] * location_var <= ABSOLUTE_ACCEPTABLE_LATENCY)
 
 #########################################
 # Objective Function
@@ -74,7 +97,7 @@ for worker_location, worker_count in workers.items():
 # The objective is to minimize the total latency for all workers.
 total_latency = sum(latencies[worker_location][location] * worker_count * location_var
                     for worker_location, worker_count in workers.items()
-                    for location, location_var in location_vars.items())
+                    for location, location_var in azure_region_options.items())
 model.Minimize(total_latency)
 
 #########################################
@@ -84,12 +107,35 @@ solver = cp_model.CpSolver()
 status = solver.Solve(model)
 
 # Print the solution.
+print()
 if status == cp_model.OPTIMAL:
     #print('Minimum total latency:', solver.ObjectiveValue())
     #print()
     print('Location:')
-    for location, location_var in location_vars.items():
-        if solver.Value(location_var) == 1:
-            print(location)
+    for region_name, region_var in azure_region_options.items():
+        if solver.Value(region_var) == 1:
+            print("  " + region_name)
 else:
     print('No solution found.')
+    exit(1)
+
+##################################################################################
+# Export data based on assumption above
+##################################################################################
+
+print()
+print('Answer results in the following latencies')
+# Export data to CSV
+with open(OUTPUT_CSV_NAME, 'w', newline='') as csvfile:
+    writer = csv.DictWriter(csvfile, fieldnames=['Location', 'Number of Workers', 'Latency', 'Hosting Location'])
+    writer.writeheader()
+    for region_name, region_var in azure_region_options.items():
+        if solver.Value(region_var) == 1:
+            for location, location_latency in latencies.items():
+                #print(location, location_latency)
+                worker_count = workers[location]
+                print("{} workers in {} with latency of {}ms to {}".format(worker_count, location, location_latency[region_name], region_name))
+                writer.writerow({'Location': location, 'Number of Workers': worker_count, 'Latency': location_latency[region_name], 'Hosting Location': region_name})
+
+print()
+print("Saved latencies to {} for reporting.".format(OUTPUT_CSV_NAME))
